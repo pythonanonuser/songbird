@@ -1,9 +1,14 @@
 mod file;
 mod hls;
 mod http;
+// `yt-dlp` is a child process; the host target (Emscripten inside a
+// JavaScript isolate) has none, and its Tokio has no `process` module.
+#[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
 mod ytdl;
 
-pub use self::{file::*, hls::*, http::*, ytdl::*};
+pub use self::{file::*, hls::*, http::*};
+#[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
+pub use self::ytdl::*;
 
 use std::{
     io::{ErrorKind as IoErrorKind, Result as IoResult, SeekFrom},
