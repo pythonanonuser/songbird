@@ -6,8 +6,11 @@ use crate::{
     Config,
 };
 use flume::Sender;
+#[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
 use rusty_pool::ThreadPool;
-use std::{result::Result as StdResult, sync::Arc, time::Duration};
+use std::{result::Result as StdResult, sync::Arc};
+#[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
+use std::time::Duration;
 use symphonia_core::{
     formats::{SeekMode, SeekTo},
     io::MediaSource,
@@ -16,6 +19,7 @@ use tokio::runtime::Handle;
 
 #[derive(Clone)]
 pub struct BlockyTaskPool {
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     pool: ThreadPool,
     handle: Handle,
 }
@@ -23,9 +27,31 @@ pub struct BlockyTaskPool {
 impl BlockyTaskPool {
     pub fn new(handle: Handle) -> Self {
         Self {
+            #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
             pool: ThreadPool::new(0, 64, Duration::from_secs(5)),
             handle,
         }
+    }
+
+    /// Runs blocking input work (create, parse, seek) off the mixer, on the
+    /// thread pool.
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
+    #[inline]
+    fn execute<F: FnOnce() + Send + 'static>(&self, task: F) {
+        self.pool.execute(task);
+    }
+
+    /// Runs blocking input work (create, parse, seek) off the mixer.
+    ///
+    /// The host target (Emscripten inside a single-threaded JavaScript isolate)
+    /// has no threads for a pool. Its Tokio runs `spawn_blocking` as an
+    /// ordinary task on the runtime, so the work happens from the next drive
+    /// instead of inside the mixer's tick. The receive path never creates
+    /// inputs, so a receive-only driver never reaches this.
+    #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+    #[inline]
+    fn execute<F: FnOnce() + Send + 'static>(&self, task: F) {
+        drop(self.handle.spawn_blocking(task));
     }
 
     pub fn create(
@@ -48,7 +74,7 @@ impl BlockyTaskPool {
                         far_pool.send_to_parse(out, lazy, callback, seek_time, config);
                     });
                 } else {
-                    self.pool.execute(move || {
+                    self.execute(move || {
                         let out = lazy.create();
                         far_pool.send_to_parse(out, lazy, callback, seek_time, config);
                     });
@@ -87,7 +113,7 @@ impl BlockyTaskPool {
     ) {
         let pool_clone = self.clone();
 
-        self.pool.execute(move || {
+        self.execute(move || {
             match input.promote(config.codec_registry, config.format_registry) {
                 Ok(LiveInput::Parsed(parsed)) => match seek_time {
                     // If seek time is zero, then wipe it out.
@@ -121,7 +147,7 @@ impl BlockyTaskPool {
     ) {
         let pool_clone = self.clone();
 
-        self.pool.execute(move || match rec {
+        self.execute(move || match rec {
             Some(rec) if (!input.supports_backseek) && backseek_needed => {
                 pool_clone.create(callback, Input::Lazy(rec), Some(seek_time), config);
             },

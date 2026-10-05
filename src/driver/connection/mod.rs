@@ -25,6 +25,7 @@ use discortp::discord::{IpDiscoveryPacket, IpDiscoveryType, MutableIpDiscoveryPa
 use error::{Error, Result};
 use flume::Sender;
 use serenity_voice_model::payload::DaveMlsKeyPackage;
+#[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
 use socket2::Socket;
 use std::sync::{atomic::AtomicU16, Arc, RwLock};
 use std::{net::IpAddr, num::NonZeroU16, str::FromStr};
@@ -123,6 +124,9 @@ impl Connection {
         let udp = UdpSocket::bind("0.0.0.0:0").await?;
 
         // Optimisation for non-receive case: set rx buffer size to zero.
+        // Not on the host target (Emscripten inside a single-threaded JavaScript
+        // isolate): its socket is link-backed and has no `socket2` handle.
+        #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
         let udp = if cfg!(feature = "receive") {
             udp
         } else {
@@ -205,14 +209,32 @@ impl Connection {
         //
         // If this is a problem for anyone, we can make non-blocking sends
         // queue up a delayed send up to a limit.
-        #[cfg(feature = "receive")]
+        #[cfg(all(
+            feature = "receive",
+            not(all(target_os = "emscripten", not(target_feature = "atomics")))
+        ))]
         let (udp_rx, udp_tx) = {
             let udp_tx = udp.into_std()?;
             let udp_rx = UdpSocket::from_std(udp_tx.try_clone()?)?;
             (udp_rx, udp_tx)
         };
-        #[cfg(not(feature = "receive"))]
+        #[cfg(all(
+            not(feature = "receive"),
+            not(all(target_os = "emscripten", not(target_feature = "atomics")))
+        ))]
         let udp_tx = udp.into_std()?;
+
+        // The host target has one link-backed socket and no file descriptor to
+        // clone or convert, so the mixer and the receive task share the
+        // `tokio::net::UdpSocket` through an `Arc`. The mixer's sends are
+        // `try_send`, which never blocks; the receive task awaits `recv_from`.
+        #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+        let udp_tx = Arc::new(udp);
+        #[cfg(all(
+            feature = "receive",
+            all(target_os = "emscripten", not(target_feature = "atomics"))
+        ))]
+        let udp_rx = udp_tx.clone();
 
         let ssrc = ready.ssrc;
 

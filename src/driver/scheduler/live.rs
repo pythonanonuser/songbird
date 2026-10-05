@@ -182,6 +182,7 @@ impl Live {
         }
     }
 
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     #[inline]
     fn run(&mut self) {
         while self.run_once() {}
@@ -189,6 +190,7 @@ impl Live {
     }
 
     /// Returns whether the loop should exit (i.e., culled by main `Scheduler`).
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     #[inline]
     pub fn run_once(&mut self) -> bool {
         // Check for new tasks.
@@ -279,6 +281,7 @@ impl Live {
         true
     }
 
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     #[cfg(test)]
     fn _march_deadline(&mut self) {
         // For testing, assume all will have same tick style.
@@ -311,6 +314,7 @@ impl Live {
         }
     }
 
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     #[cfg(not(test))]
     #[inline(always)]
     #[allow(clippy::inline_always)]
@@ -319,6 +323,7 @@ impl Live {
         self.deadline += TIMESTEP_LENGTH;
     }
 
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     #[inline]
     fn march_deadline(&mut self) {
         #[cfg(feature = "internals")]
@@ -625,9 +630,173 @@ impl Live {
     }
 
     /// Spawn a new sync thread to manage `Mixer`s.
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     fn spawn(mut self) {
         std::thread::spawn(move || {
             self.run();
+        });
+    }
+}
+
+/// The host target (Emscripten inside a single-threaded JavaScript isolate)
+/// has no thread to give this loop, and a `std::thread::sleep` there would
+/// stall the host. So the same loop runs as a task on the current runtime:
+/// `spawn` is `tokio::spawn`, the deadline wait is `tokio::time::sleep_until`,
+/// and the test-mode tick receive is `recv_async`. The loop never blocks on a
+/// channel: `handle_scheduler_msgs` and `handle_task_msgs` use `try_recv`.
+///
+/// `run_once` here is the native `run_once` above, with the one `.await` on
+/// `march_deadline`. Keep the two bodies identical.
+#[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+#[allow(missing_docs)]
+impl Live {
+    async fn run(&mut self) {
+        while self.run_once().await {}
+        self.global_stats.remove_worker();
+    }
+
+    /// Returns whether the loop should exit (i.e., culled by main `Scheduler`).
+    pub async fn run_once(&mut self) -> bool {
+        // Check for new tasks.
+        if self.handle_scheduler_msgs().is_err() {
+            return false;
+        }
+
+        // Receive commands for each task.
+        self.handle_task_msgs();
+
+        // Move any idle calls back to the global pool.
+        self.demote_and_remove_mixers();
+
+        // Take a clock measure before and after each packet.
+        let mut pre_pkt_time = Instant::now();
+        let mut worst_task = (0, Duration::default());
+
+        for (i, (packet_len, mixer)) in self
+            .packet_lens
+            .iter_mut()
+            .zip(self.tasks.iter_mut())
+            .enumerate()
+        {
+            let (block, inner) = get_memory_indices(i);
+            match mixer.mix_and_build_packet(&mut self.packets[block][inner..][..VOICE_PACKET_MAX])
+            {
+                Ok(written_sz) => *packet_len = written_sz,
+                e => {
+                    *packet_len = 0;
+                    rebuild_if_err(mixer, e, &mut self.to_cull, i);
+                },
+            }
+            let post_pkt_time = Instant::now();
+            let cost = post_pkt_time.duration_since(pre_pkt_time);
+            if cost > worst_task.1 {
+                worst_task = (i, cost);
+            }
+            pre_pkt_time = post_pkt_time;
+        }
+
+        let end_of_work = pre_pkt_time;
+
+        if let Some(start_of_work) = self.start_of_work {
+            let ns_cost = self.stats.store_compute_cost(end_of_work - start_of_work);
+
+            if self.config.move_expensive_tasks
+                && ns_cost >= RESCHEDULE_THRESHOLD
+                && self.ids.len() > 1
+            {
+                self.offload_mixer(worst_task.0, worst_task.1);
+            }
+        }
+
+        self.timed_remove_excess_blocks(end_of_work);
+
+        // Wait till the right time to send this packet:
+        // usually a 20ms tick, in test modes this is either a finite number of runs or user input.
+        self.march_deadline().await;
+
+        // Send all.
+        self.start_of_work = Some(Instant::now());
+        for (i, (packet_len, mixer)) in self
+            .packet_lens
+            .iter_mut()
+            .zip(self.tasks.iter_mut())
+            .enumerate()
+        {
+            let (block, inner) = get_memory_indices(i);
+            let packet = &mut self.packets[block][inner..];
+            if *packet_len > 0 {
+                let res = mixer.send_packet(&packet[..*packet_len]);
+                rebuild_if_err(mixer, res, &mut self.to_cull, i);
+            }
+            #[cfg(test)]
+            if *packet_len == 0 {
+                mixer.test_signal_empty_tick();
+            }
+            advance_rtp_counters(packet);
+        }
+
+        for (i, mixer) in self.tasks.iter_mut().enumerate() {
+            let res = mixer
+                .audio_commands_events()
+                .and_then(|()| mixer.check_and_send_keepalive(self.start_of_work));
+            rebuild_if_err(mixer, res, &mut self.to_cull, i);
+        }
+
+        true
+    }
+
+    #[cfg(test)]
+    async fn _march_deadline(&mut self) {
+        // For testing, assume all will have same tick style.
+        // Only count 'remaining loops' on one of the nodes.
+        let mixer = self.tasks.get_mut(0).map(|m| {
+            let style = m.config.tick_style.clone();
+            (m, style)
+        });
+
+        match mixer {
+            None | Some((_, TickStyle::Timed)) => {
+                tokio::time::sleep_until(self.deadline.into()).await;
+                self.deadline += TIMESTEP_LENGTH;
+            },
+            Some((m, TickStyle::UntimedWithExecLimit(rx))) => {
+                if m.remaining_loops.is_none() {
+                    if let Ok(new_val) = rx.recv_async().await {
+                        m.remaining_loops = Some(new_val.wrapping_sub(1));
+                    }
+                }
+
+                if let Some(cnt) = m.remaining_loops.as_mut() {
+                    if *cnt == 0 {
+                        m.remaining_loops = None;
+                    } else {
+                        *cnt = cnt.wrapping_sub(1);
+                    }
+                }
+            },
+        }
+    }
+
+    #[cfg(not(test))]
+    async fn _march_deadline(&mut self) {
+        tokio::time::sleep_until(self.deadline.into()).await;
+        self.deadline += TIMESTEP_LENGTH;
+    }
+
+    async fn march_deadline(&mut self) {
+        #[cfg(feature = "internals")]
+        {
+            return;
+        }
+
+        #[allow(clippy::used_underscore_items)]
+        self._march_deadline().await;
+    }
+
+    /// Spawn the loop as a task on the current runtime.
+    fn spawn(mut self) {
+        tokio::spawn(async move {
+            self.run().await;
         });
     }
 }

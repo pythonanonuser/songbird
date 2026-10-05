@@ -113,6 +113,11 @@ impl Scheduler {
     }
 
     /// Request a list of handles to statistics for currently live workers with a blocking call.
+    ///
+    /// Not on the host target (Emscripten inside a single-threaded JavaScript
+    /// isolate): a blocking receive there stalls the host, and the scheduler
+    /// task that would answer it could never run.
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     pub fn worker_thread_stats_blocking(&self) -> Result<Vec<Arc<LiveStatBlock>>, Error> {
         let (tx, rx) = flume::bounded(1);
         _ = self.inner.tx.send(SchedulerMessage::GetStats(tx));

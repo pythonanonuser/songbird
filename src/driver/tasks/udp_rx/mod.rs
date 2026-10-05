@@ -43,7 +43,12 @@ struct UdpRx {
     config: Config,
     rx: Receiver<UdpRxMessage>,
     ssrc_signalling: Arc<SsrcTracker>,
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     udp_socket: UdpSocket,
+    /// On the host target (Emscripten inside a single-threaded JavaScript
+    /// isolate) this is the one link-backed socket, shared with the mixer.
+    #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+    udp_socket: Arc<UdpSocket>,
     dave_session: Arc<RwLock<Option<davey::DaveSession>>>,
     dave_protocol_version: Arc<AtomicU16>,
 }
@@ -328,7 +333,10 @@ pub(crate) async fn runner(
     cipher: Cipher,
     crypto_mode: CryptoMode,
     config: Config,
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     udp_socket: UdpSocket,
+    #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+    udp_socket: Arc<UdpSocket>,
     ssrc_signalling: Arc<SsrcTracker>,
     dave_session: Arc<RwLock<Option<davey::DaveSession>>>,
     dave_protocol_version: Arc<AtomicU16>,

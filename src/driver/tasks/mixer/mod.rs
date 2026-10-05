@@ -710,13 +710,22 @@ impl Mixer {
             // Test mode: send unencrypted (compressed) packets to local receiver.
             drop(tx.send(packet.to_vec().into()));
         } else {
+            #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
             conn.udp_tx.send(packet)?;
+            #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+            conn.udp_tx.try_send(packet)?;
         }
 
         #[cfg(not(test))]
         {
             // Normal operation: send encrypted payload to UDP Tx task.
+            #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
             conn.udp_tx.send(packet)?;
+            // The host target's `udp_tx` is the shared `tokio::net::UdpSocket`.
+            // `try_send` never blocks; a full link answers `WouldBlock`, which
+            // `send_packet` disarms exactly as it does for the native socket.
+            #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+            conn.udp_tx.try_send(packet)?;
         }
 
         Ok(())
@@ -727,7 +736,10 @@ impl Mixer {
         if let Some(conn) = self.conn_active.as_mut() {
             let now = now.unwrap_or_else(Instant::now);
             if now >= self.keepalive_deadline {
+                #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
                 conn.udp_tx.send(&self.keepalive_packet)?;
+                #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+                conn.udp_tx.try_send(&self.keepalive_packet)?;
                 self.keepalive_deadline += UDP_KEEPALIVE_GAP;
             }
         }

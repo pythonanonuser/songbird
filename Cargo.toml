@@ -42,7 +42,6 @@ reqwest = { default-features = false, features = [
 ], optional = true, version = "0.12.2" }
 ringbuf = { optional = true, version = "0.4" }
 rubato = { optional = true, version = "0.16" }
-rusty_pool = { optional = true, version = "0.7" }
 serde = { version = "1", features = ["derive"] }
 serde-aux = { optional = true, version = "4" }
 serde_json = "1"
@@ -51,7 +50,6 @@ serenity = { default-features = false, optional = true, version = "0.12.0", feat
     "gateway",
 ] }
 serenity-voice-model = { optional = true, version = "0.3" }
-socket2 = { optional = true, version = "0.5" }
 streamcatcher = { optional = true, version = "1" }
 stream_lib = { default-features = false, optional = true, version = "0.5.2" }
 symphonia = { default-features = false, optional = true, version = "0.5.2" }
@@ -74,6 +72,16 @@ url = { optional = true, version = "2" }
 uuid = { features = ["v4"], optional = true, version = "1" }
 nonmax = "0.5.5"
 enum-map = "2.7.3"
+
+# The host target (Emscripten inside a single-threaded JavaScript isolate) has
+# no threads and no socket file descriptors. There the driver runs blocking
+# input work through `tokio::task::spawn_blocking` and the mixer shares one
+# `tokio::net::UdpSocket` with the receive task, so these two crates are
+# native-only. The `driver` feature still names them with `dep:`; on the host
+# target that enables nothing.
+[target.'cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))'.dependencies]
+rusty_pool = { optional = true, version = "0.7" }
+socket2 = { optional = true, version = "0.5" }
 
 [dev-dependencies]
 byteorder = "1"

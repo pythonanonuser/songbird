@@ -9,10 +9,9 @@ use crate::{
     input::{AudioStreamError, Compose, Parsed},
 };
 use flume::Sender;
-use std::{
-    net::UdpSocket,
-    sync::{atomic::AtomicU16, Arc, RwLock},
-};
+#[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
+use std::net::UdpSocket;
+use std::sync::{atomic::AtomicU16, Arc, RwLock};
 use symphonia_core::{errors::Error as SymphoniaError, formats::SeekedTo};
 
 pub struct MixerConnection {
@@ -22,7 +21,14 @@ pub struct MixerConnection {
     pub dave_protocol_version: Arc<AtomicU16>,
     #[cfg(feature = "receive")]
     pub udp_rx: Sender<UdpRxMessage>,
+    #[cfg(not(all(target_os = "emscripten", not(target_feature = "atomics"))))]
     pub udp_tx: UdpSocket,
+    /// On the host target (Emscripten inside a single-threaded JavaScript
+    /// isolate) the socket is link-backed and has no file descriptor to clone,
+    /// so the mixer shares the one `tokio::net::UdpSocket` with the receive
+    /// task and sends with `try_send`, which never blocks.
+    #[cfg(all(target_os = "emscripten", not(target_feature = "atomics")))]
+    pub udp_tx: Arc<tokio::net::UdpSocket>,
 }
 
 pub enum MixerMessage {
