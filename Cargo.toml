@@ -73,6 +73,10 @@ uuid = { features = ["v4"], optional = true, version = "1" }
 nonmax = "0.5.5"
 enum-map = "2.7.3"
 
+[target.'cfg(target_os = "emscripten")'.dependencies]
+http = "1"
+wsio = { path = "../twt-live-transport/crates/wsio" }
+
 # The host target (Emscripten inside a single-threaded JavaScript isolate) has
 # no threads and no socket file descriptors. There the driver runs blocking
 # input work through `tokio::task::spawn_blocking` and the mixer shares one
