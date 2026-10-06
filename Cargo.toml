@@ -75,7 +75,7 @@ enum-map = "2.7.3"
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
 http = "1"
-wsio = { path = "../twt-live-transport/crates/wsio" }
+wsio = { path = "../twt-live-workers/crates/wsio" }
 
 # The host target (Emscripten inside a single-threaded JavaScript isolate) has
 # no threads and no socket file descriptors. There the driver runs blocking
